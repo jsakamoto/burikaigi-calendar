@@ -1,0 +1,6 @@
+@BuriKaigiCalendar_HostAddress = http://localhost:5032
+
+GET {{BuriKaigiCalendar_HostAddress}}/ical/v1
+Accept: application/json
+
+###
