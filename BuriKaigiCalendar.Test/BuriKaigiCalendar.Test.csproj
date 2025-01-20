@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="ChainingAssertion-NUnit.Bin" Version="4.0.1" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <Using Include="NUnit.Framework" />
     <PackageReference Include="NUnit" Version="4.3.2" />
     <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
     <PackageReference Include="NUnit.Analyzers" Version="4.6.0">
@@ -29,10 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Assets\burikaigi.dev.html">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Assets\burikaigi.dev.speakers.x.html">
+    <None Update="Assets\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

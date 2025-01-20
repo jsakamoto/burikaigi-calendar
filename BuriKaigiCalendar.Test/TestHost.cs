@@ -12,8 +12,8 @@ internal class TestHost
         {
             var fileName = request.RequestUri?.AbsoluteUri switch
             {
-                "https://burikaigi.dev/" => "burikaigi.dev.html",
-                string path when path.StartsWith("https://burikaigi.dev/speakers/") => "burikaigi.dev.speakers.x.html",
+                "https://fortee.jp/burikaigi-2025/timetable" => "timetable.html",
+                string path when path.StartsWith("https://fortee.jp/burikaigi-2025/proposal/session-") => $"session-{path.Last()}.html",
                 _ => throw new NotImplementedException()
             };
 
