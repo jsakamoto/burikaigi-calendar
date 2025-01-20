@@ -1,5 +1,5 @@
 ﻿using System.Globalization;
-using AngleSharp.Html.Dom;
+using System.Text.RegularExpressions;
 using AngleSharp.Html.Parser;
 using BuriKaigiCalendar.Models;
 using Ical.Net.CalendarComponents;
@@ -19,72 +19,98 @@ internal class Agenda
 
     internal async ValueTask<IEnumerable<Session>> GetSessionsAsync()
     {
-        static DateTime ParseDateTime(string? time) => DateTime.TryParse($"2024-01-20T{time}+9:00", null, DateTimeStyles.AdjustToUniversal, out var date) ? date : DateTime.MinValue;
-
-        static async ValueTask<string> GetDescriptionAsync(HttpClient httpClient, HtmlParser parser, string url)
-        {
-            if (string.IsNullOrEmpty(url)) return "";
-            var response = await httpClient.GetStringAsync(url);
-            var document = await parser.ParseDocumentAsync(response);
-            var descriptions = document.QuerySelectorAll(".session--info > *:not(h1)")
-                .Select(e => e.TextContent)
-                .Select(text => text.Replace("\r", ""))
-                .Select(text => text.Replace("\n", "<br/>"))
-                .ToArray();
-            return string.Concat(descriptions.Length < 2 ? descriptions : descriptions.Select(d => $"<p>{d}</p>"));
-        }
-
+        static DateTime ParseDateTime(string? dateTime) => DateTime.TryParse($"{dateTime}+9:00", null, DateTimeStyles.AdjustToUniversal, out var date) ? date : DateTime.MinValue;
         var sessionList = new List<Session>();
 
-        // Fetch the Agenda page.
-        var baseUrl = "https://burikaigi.dev";
+        var authority = "https://fortee.jp";
         var httpClient = this._httpClientFactory.CreateClient();
-        var response = await httpClient.GetStringAsync(baseUrl);
-
-        // Parse the HTML string by AngleSharp's HtmlParser
         var parser = new HtmlParser();
-        var document = await parser.ParseDocumentAsync(response);
 
-        var schedule = document.QuerySelector("#schedule");
-        var scheduleContent = schedule?.LastElementChild?.LastElementChild;
-        var trackHeaders = scheduleContent?.QuerySelectorAll("h3").AsEnumerable() ?? [];
-        foreach (var trackHeader in trackHeaders)
+        // Fetch the time table page
+        var timetablePage = await httpClient.GetStringAsync("https://fortee.jp/burikaigi-2025/timetable");
+        var timetableDoc = await parser.ParseDocumentAsync(timetablePage);
+
+        // Parse the rooms for each track
+        var rooms = timetableDoc.QuerySelectorAll(".track-header").Select(e => e.TextContent.Trim()).ToArray();
+
+        // Parse the event start time
+        var eventStartTimeText = timetableDoc.QuerySelector("#timetable")?.GetAttribute("data-from");
+        if (eventStartTimeText is null) return sessionList;
+        var eventStartTime = DateTime.Parse(eventStartTimeText, null, DateTimeStyles.AdjustToUniversal);
+
+        // Traverse each session detail page
+        var proposalBlocks = timetableDoc.QuerySelectorAll(".proposal");
+        foreach (var proposalBlock in proposalBlocks)
         {
-            var trackName = trackHeader.TextContent;
-            var roomName = trackHeader.NextElementSibling?.TextContent;
-
-            var sessionsContainer = trackHeader.ParentElement?.NextElementSibling;
-            var sessions = sessionsContainer?.QuerySelectorAll("li").AsEnumerable() ?? [];
-            foreach (var session in sessions)
+            if (proposalBlock.ClassList.Contains("time-slot"))
             {
-                var speakerElement = session.QuerySelector("h4");
-                var speaker = speakerElement?.TextContent ?? "";
-                if (speaker == "休憩") continue;
+                // Start time = 10:00 AM, 15min. = 30px
+                var trackText = proposalBlock.ClassList.FirstOrDefault(c => c.StartsWith("track-"));
+                if (trackText is null) continue;
+                var track = int.Parse(trackText.Substring(6));
+                var room = rooms[track - 1];
 
-                var times = session.QuerySelectorAll("time").AsEnumerable()
-                    .Select(t => ParseDateTime(t.TextContent)) ?? [];
+                var styleText = proposalBlock.GetAttribute("style") ?? "";
+                var top = int.TryParse(Regex.Match(styleText, @"top:[ \t]*(\d+)px").Groups[1].Value, out var n) ? n : -1;
+                if (top == -1) continue;
 
-                var startTime = times.FirstOrDefault();
-                var endTime = times.Skip(1).FirstOrDefault();
-                if (endTime == DateTime.MinValue) endTime = startTime.AddMinutes(10);
+                var startTime = eventStartTime.AddMinutes(top / 30 * 5);
+                var rawTitleText = proposalBlock.QuerySelector(".title")?.TextContent.Trim() ?? "";
+                var m = Regex.Match(rawTitleText, @"^(?<title>(.+))[（\(](?<duration>\d+)分[）\)]");
+                if (!m.Success) continue;
 
-                var titleElement = speakerElement?.NextElementSibling;
-                var title = titleElement?.ChildElementCount == 0 ? titleElement.TextContent : "" ?? "";
-                var url = titleElement is IHtmlAnchorElement anchor ? baseUrl + anchor.PathName : "";
+                var title = m.Groups["title"].Value.Trim();
+                var duration = int.Parse(m.Groups["duration"].Value);
 
-                var organizationElement = titleElement?.NextElementSibling;
-                var organization = organizationElement?.ChildElementCount == 0 ? organizationElement.TextContent : default;
-
-                var descriptions = await GetDescriptionAsync(httpClient, parser, url);
-
+                // Add the session to the list
                 sessionList.Add(new Session
                 {
-                    Speaker = (title == "" ? "" : speaker) + (organization != null ? $" ({organization})" : ""),
+                    Speaker = "",
+                    Title = title,
+                    StartTime = startTime,
+                    EndTime = startTime.AddMinutes(duration),
+                    Description = "",
+                    Location = room,
+                });
+            }
+            else
+            {
+                var titleElement = proposalBlock.QuerySelector(".title a");
+                if (titleElement is null) continue;
+
+                var title = titleElement.TextContent.Trim();
+
+                // Fetch the session detail page
+                await Task.Delay(10);
+                var sessionUrl = titleElement.GetAttribute("href");
+                var sessionPage = await httpClient.GetStringAsync(authority + sessionUrl);
+                var sessionDoc = await parser.ParseDocumentAsync(sessionPage);
+
+                // Parse the session detail page
+                var sessionInfoBlock = sessionDoc.QuerySelector(".type");
+                var location = sessionInfoBlock?.QuerySelector(".track")?.TextContent.Trim() ?? "";
+                var startTime = ParseDateTime(sessionInfoBlock?.QuerySelector(".schedule")?.TextContent.Trim().TrimEnd('〜'));
+                var durationText = sessionInfoBlock?.QuerySelector(".name")?.TextContent ?? "";
+                var duration = Regex.Match(durationText, @"(\d+)分") switch
+                {
+                    Match m when m.Success => int.Parse(m.Groups[1].Value),
+                    _ => 0
+                };
+                var endTime = startTime.AddMinutes(duration);
+                var speakerBlock = sessionDoc.QuerySelector(".speaker");
+                var speaker = speakerBlock?.QuerySelector("span")?.TextContent.Trim() ?? "";
+                var descriptionBlock = sessionDoc.QuerySelector(".abstract");
+                var description = string.Join("\n", (descriptionBlock?.TextContent.Trim() ?? "").Split('\n').Select(s => s.Trim())).Replace("\n\n", "\n");
+
+                // Add the session to the list
+                sessionList.Add(new Session
+                {
+                    Speaker = speaker,
                     Title = title == "" ? speaker : title,
                     StartTime = startTime,
                     EndTime = endTime,
-                    Description = descriptions,
-                    Location = $"{trackName} ({roomName})",
+                    Description = description,
+                    Location = location,
                 });
             }
         }
